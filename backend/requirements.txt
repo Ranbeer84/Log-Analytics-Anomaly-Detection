@@ -1,0 +1,69 @@
+# ===================================
+# BACKEND REQUIREMENTS
+# AI Log Analytics - Backend Service
+# ===================================
+
+# FastAPI Core
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# Database - MongoDB
+motor==3.3.2                    # Async MongoDB driver
+pymongo==4.6.1                  # Sync MongoDB driver (for scripts)
+
+# Redis - Streaming & Caching
+redis==5.0.1                    # Redis client with async support
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+
+# Authentication & Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+
+# Utilities
+python-dotenv==1.0.0
+aiofiles==23.2.1
+
+# WebSocket Support
+websockets==12.0
+
+# HTTP Client (for ML service calls & webhooks)
+httpx==0.26.0
+aiohttp==3.9.1
+
+# Email & Notifications
+aiosmtplib==3.0.1
+emails==0.6
+
+# Monitoring & Logging
+prometheus-client==0.19.0
+python-json-logger==2.0.7
+
+# Date & Time
+python-dateutil==2.8.2
+
+# Validation & Parsing
+email-validator==2.1.0
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+faker==22.0.0                   # For generating test data
+
+# Development Tools
+black==24.1.1                   # Code formatter
+flake8==7.0.0                   # Linter
+mypy==1.8.0                     # Type checker
+isort==5.13.2                   # Import sorter
+pre-commit==3.6.0               # Git hooks
+
+# Documentation
+mkdocs==1.5.3                   # Optional: for docs generation
+mkdocs-material==9.5.3          # Optional: material theme

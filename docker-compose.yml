@@ -1,0 +1,163 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: log_analytics_mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: adminpass123
+      MONGO_INITDB_DATABASE: log_analytics
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./config/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js
+    networks:
+      - log_analytics_network
+
+  # Redis for Streaming
+  redis:
+    image: redis:7.2-alpine
+    container_name: log_analytics_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - log_analytics_network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: log_analytics_backend
+    restart: unless-stopped
+    environment:
+      - MONGODB_URL=mongodb://admin:adminpass123@mongodb:27017/
+      - REDIS_URL=redis://redis:6379
+      - ENV=development
+      - LOG_LEVEL=INFO
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - log_analytics_network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ML Service
+  ml_service:
+    build:
+      context: ./ml
+      dockerfile: Dockerfile
+    container_name: log_analytics_ml
+    restart: unless-stopped
+    environment:
+      - MONGODB_URL=mongodb://admin:adminpass123@mongodb:27017/
+      - REDIS_URL=redis://redis:6379
+      - MODEL_PATH=/app/saved_models
+    volumes:
+      - ./ml:/app
+      - ./data:/app/data
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - log_analytics_network
+
+  # Log Consumer Worker
+  log_consumer:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: log_analytics_consumer
+    restart: unless-stopped
+    environment:
+      - MONGODB_URL=mongodb://admin:adminpass123@mongodb:27017/
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./workers:/app
+    depends_on:
+      - mongodb
+      - redis
+      - ml_service
+    networks:
+      - log_analytics_network
+    command: python log_consumer.py
+
+  # Anomaly Detection Worker
+  anomaly_worker:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: log_analytics_anomaly_worker
+    restart: unless-stopped
+    environment:
+      - MONGODB_URL=mongodb://admin:adminpass123@mongodb:27017/
+      - REDIS_URL=redis://redis:6379
+      - ML_SERVICE_URL=http://ml_service:8001
+    volumes:
+      - ./workers:/app
+    depends_on:
+      - mongodb
+      - redis
+      - ml_service
+    networks:
+      - log_analytics_network
+    command: python anomaly_worker.py
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: log_analytics_frontend
+    restart: unless-stopped
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_WS_URL=ws://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - log_analytics_network
+    command: npm run dev -- --host
+
+  # Nginx Reverse Proxy (Optional - for production)
+  nginx:
+    image: nginx:alpine
+    container_name: log_analytics_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - log_analytics_network
+    profiles:
+      - production
+
+volumes:
+  mongodb_data:
+  redis_data:
+
+networks:
+  log_analytics_network:
+    driver: bridge
