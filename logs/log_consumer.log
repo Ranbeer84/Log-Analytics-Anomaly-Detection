@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/Users/ranbeersingh/Documents/Ranbeer/Projects/ai-log-analytics/workers/log_consumer.py", line 16, in <module>
+    import redis
+ModuleNotFoundError: No module named 'redis'

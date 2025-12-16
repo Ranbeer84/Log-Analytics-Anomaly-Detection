@@ -1,4 +1,4 @@
-version: '3.8'
+# version: '3.8'
 
 services:
   # MongoDB Database
@@ -117,25 +117,25 @@ services:
     command: python anomaly_worker.py
 
   # Frontend
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: log_analytics_frontend
-    restart: unless-stopped
-    environment:
-      - VITE_API_URL=http://localhost:8000
-      - VITE_WS_URL=ws://localhost:8000
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    depends_on:
-      - backend
-    networks:
-      - log_analytics_network
-    command: npm run dev -- --host
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   container_name: log_analytics_frontend
+  #   restart: unless-stopped
+  #   environment:
+  #     - VITE_API_URL=http://localhost:8000
+  #     - VITE_WS_URL=ws://localhost:8000
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - ./frontend:/app
+  #     - /app/node_modules
+  #   depends_on:
+  #     - backend
+  #   networks:
+  #     - log_analytics_network
+  #   command: npm run dev -- --host
 
   # Nginx Reverse Proxy (Optional - for production)
   nginx:

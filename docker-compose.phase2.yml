@@ -1,0 +1,153 @@
+# version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:6.0
+    container_name: log_analytics_mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+      MONGO_INITDB_DATABASE: log_analytics
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./config/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - log_analytics_network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/log_analytics --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for streaming and caching
+  redis:
+    image: redis:7-alpine
+    container_name: log_analytics_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - log_analytics_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: log_analytics_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URI=mongodb://admin:admin123@mongodb:27017
+      - DB_NAME=log_analytics
+      - REDIS_URL=redis://redis:6379
+      - API_KEY=your-secret-api-key-here
+      - ENVIRONMENT=production
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/app:/app/app
+    networks:
+      - log_analytics_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Log Consumer Worker
+  log_consumer:
+    build:
+      context: .
+      dockerfile: workers/Dockerfile
+    container_name: log_analytics_consumer
+    restart: unless-stopped
+    command: python workers/log_consumer.py
+    environment:
+      - MONGODB_URI=mongodb://admin:admin123@mongodb:27017
+      - DB_NAME=log_analytics
+      - REDIS_URL=redis://redis:6379
+      - CONSUMER_NAME=consumer_docker
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./workers:/app/workers
+      - ./ml:/app/ml
+    networks:
+      - log_analytics_network
+
+  # Anomaly Detection Worker
+  anomaly_worker:
+    build:
+      context: .
+      dockerfile: workers/Dockerfile
+    container_name: log_analytics_anomaly
+    restart: unless-stopped
+    command: python workers/anomaly_worker.py
+    environment:
+      - MONGODB_URI=mongodb://admin:admin123@mongodb:27017
+      - DB_NAME=log_analytics
+      - REDIS_URL=redis://redis:6379
+      - CONSUMER_NAME=detector_docker
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./workers:/app/workers
+      - ./ml:/app/ml
+    networks:
+      - log_analytics_network
+
+  # Alert Worker
+  alert_worker:
+    build:
+      context: .
+      dockerfile: workers/Dockerfile
+    container_name: log_analytics_alerts
+    restart: unless-stopped
+    command: python workers/alert_worker.py
+    environment:
+      - MONGODB_URI=mongodb://admin:admin123@mongodb:27017
+      - DB_NAME=log_analytics
+      - ALERT_CHECK_INTERVAL=60
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./workers:/app/workers
+    networks:
+      - log_analytics_network
+
+networks:
+  log_analytics_network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+    driver: local
+  redis_data:
+    driver: local
