@@ -7,6 +7,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.schemas.log_schema import LogCreate, LogQuery
 from app.models.log_entry import LogEntry
 from app.core.redis_client import publish_log_to_stream
+# import encoder(fix error)
+from fastapi.encoders import jsonable_encoder
 import logging
 
 logger = logging.getLogger(__name__)
@@ -29,32 +31,70 @@ class LogService:
         Returns:
             Created log with ID
         """
+        # try:
+        #     # Prepare log document
+
+        #     # While ingesting logs cause error - Object of type datetime is not JSON serializable
+        #     # MongoDB is fine — Redis is failing.
+        #     # convert the Pydantic model into a JSON-safe dict before inserting into MongoDB and publishing to Redis. 
+
+        #     # log_dict = log_data.model_dump()
+        #     # log_dict['created_at'] = datetime.utcnow()
+
+        #     # Correct 
+        #     log_dict = jsonable_encoder(log_data)
+        #     log_dict['created_at'] = datetime.utcnow().isoformat()
+
+        #     log_dict['processed'] = False
+        #     log_dict['anomaly_checked'] = False
+            
+        #     # Insert into MongoDB
+        #     result = await self.collection.insert_one(log_dict)
+        #     log_id = str(result.inserted_id)
+            
+        #     # Publish to Redis Stream for async processing
+        #     log_dict['_id'] = log_id
+        #     stream_id = await publish_log_to_stream(log_dict)
+            
+        #     logger.info(f"Log created: {log_id}, Stream ID: {stream_id}")
+            
+        #     return {
+        #         "log_id": log_id,
+        #         "stream_id": stream_id,
+        #         "timestamp": log_dict['timestamp']
+        #     }
+            
+        # except Exception as e:
+        #     logger.error(f"Error creating log: {e}")
+        #     raise
         try:
-            # Prepare log document
-            log_dict = log_data.model_dump()
-            log_dict['created_at'] = datetime.utcnow()
-            log_dict['processed'] = False
-            log_dict['anomaly_checked'] = False
-            
-            # Insert into MongoDB
-            result = await self.collection.insert_one(log_dict)
+            # 1️⃣ MongoDB document (KEEP datetime objects)
+            mongo_doc = log_data.model_dump()     # timestamp is datetime
+            mongo_doc["created_at"] = datetime.utcnow()
+            mongo_doc["processed"] = False
+            mongo_doc["anomaly_checked"] = False
+
+            # Insert into MongoDB (schema expects BSON dates)
+            result = await self.collection.insert_one(mongo_doc)
             log_id = str(result.inserted_id)
-            
-            # Publish to Redis Stream for async processing
-            log_dict['_id'] = log_id
-            stream_id = await publish_log_to_stream(log_dict)
-            
+
+            # 2️⃣ Redis payload (JSON-safe)
+            redis_doc = jsonable_encoder(mongo_doc)
+            redis_doc["_id"] = log_id
+
+            stream_id = await publish_log_to_stream(redis_doc)
+
             logger.info(f"Log created: {log_id}, Stream ID: {stream_id}")
-            
+
             return {
                 "log_id": log_id,
-                "stream_id": stream_id,
-                "timestamp": log_dict['timestamp']
+                "stream_id": stream_id
             }
-            
+
         except Exception as e:
             logger.error(f"Error creating log: {e}")
             raise
+        # 
     
     async def create_logs_batch(self, logs: List[LogCreate]) -> Dict[str, Any]:
         """

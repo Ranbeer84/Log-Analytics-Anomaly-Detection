@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     
     # API
-    API_V1_PREFIX: str = "/api/v1"
+    API_V1_PREFIX: str = "/api"
     SECRET_KEY: str = "your-secret-key-change-this-in-production-min-32-chars"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     REDIS_CONSUMER_GROUP: str = "log_processors"
     
     # ML Service
-    ML_SERVICE_URL: str = "http://ml_service:8001"
+    ML_SERVICE_URL: str = "http://ml_service:8000"
     ANOMALY_THRESHOLD: float = 0.8
     
     # Email Alerts
