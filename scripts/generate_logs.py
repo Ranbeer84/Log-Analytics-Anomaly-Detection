@@ -178,7 +178,7 @@ async def send_log(log: dict, api_url: str):
     """Send log to API"""
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(f"{api_url}/api/v1/logs", json=log, timeout=10.0)
+            response = await client.post(f"{api_url}/api/logs", json=log, timeout=10.0)
             return response.status_code == 201
         except Exception as e:
             logger.error(f"Error sending log: {e}")
