@@ -1,243 +1,350 @@
 """
-Isolation Forest Model for Anomaly Detection
+Training pipeline for Isolation Forest anomaly detection
 """
-import numpy as np
-import pickle
-from sklearn.ensemble import IsolationForest
-from typing import Dict, List, Tuple, Optional
-from datetime import datetime
+import sys
+import argparse
 import logging
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+import pickle
+import json
+from datetime import datetime
 
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from models.isolation_forest import IsolationForestDetector
+from training.data_preprocessor import LogDataPreprocessor
+from evaluation.metrics import AnomalyDetectionMetrics
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 
-class IsolationForestDetector:
-    """Isolation Forest-based anomaly detector for log data"""
+def load_data_from_mongodb(
+    mongodb_uri: str,
+    database: str = 'log_analytics',
+    collection: str = 'logs',
+    limit: int = 10000
+) -> pd.DataFrame:
+    """
+    Load log data from MongoDB
     
-    def __init__(
-        self,
-        contamination: float = 0.1,
-        n_estimators: int = 100,
-        max_samples: str = 'auto',
-        random_state: int = 42
-    ):
-        """
-        Initialize Isolation Forest detector
+    Args:
+        mongodb_uri: MongoDB connection string
+        database: Database name
+        collection: Collection name
+        limit: Maximum number of records
         
-        Args:
-            contamination: Expected proportion of anomalies
-            n_estimators: Number of trees
-            max_samples: Number of samples to draw
-            random_state: Random seed
-        """
-        self.model = IsolationForest(
-            contamination=contamination,
-            n_estimators=n_estimators,
-            max_samples=max_samples,
-            random_state=random_state,
-            n_jobs=-1
+    Returns:
+        DataFrame with log data
+    """
+    from pymongo import MongoClient
+    
+    logger.info(f"Loading data from MongoDB: {database}.{collection}")
+    
+    client = MongoClient(mongodb_uri)
+    db = client[database]
+    
+    # Get logs
+    logs = list(db[collection].find().limit(limit))
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(logs)
+    
+    logger.info(f"Loaded {len(df)} log entries")
+    
+    client.close()
+    
+    return df
+
+
+def load_data_from_csv(csv_path: str) -> pd.DataFrame:
+    """Load log data from CSV file"""
+    logger.info(f"Loading data from CSV: {csv_path}")
+    df = pd.read_csv(csv_path)
+    logger.info(f"Loaded {len(df)} log entries")
+    return df
+
+
+def train_isolation_forest(
+    train_data: pd.DataFrame,
+    preprocessor: LogDataPreprocessor,
+    contamination: float = 0.1,
+    n_estimators: int = 100,
+    random_state: int = 42
+) -> IsolationForestDetector:
+    """
+    Train Isolation Forest model
+    
+    Args:
+        train_data: Training data
+        preprocessor: Fitted preprocessor
+        contamination: Expected proportion of anomalies
+        n_estimators: Number of trees
+        random_state: Random seed
+        
+    Returns:
+        Trained model
+    """
+    logger.info("Training Isolation Forest model...")
+    
+    # Preprocess data
+    X_train = preprocessor.transform(train_data)
+    
+    # Create and train model
+    model = IsolationForestDetector(
+        contamination=contamination,
+        n_estimators=n_estimators,
+        random_state=random_state
+    )
+    
+    model.fit(X_train)
+    
+    logger.info("Training completed")
+    
+    return model
+
+
+def evaluate_model(
+    model: IsolationForestDetector,
+    test_data: pd.DataFrame,
+    preprocessor: LogDataPreprocessor,
+    true_labels: np.ndarray = None
+) -> dict:
+    """
+    Evaluate model performance
+    
+    Args:
+        model: Trained model
+        test_data: Test data
+        preprocessor: Fitted preprocessor
+        true_labels: True anomaly labels (if available)
+        
+    Returns:
+        Evaluation metrics
+    """
+    logger.info("Evaluating model...")
+    
+    # Preprocess
+    X_test = preprocessor.transform(test_data)
+    
+    # Predict
+    predictions = model.predict(X_test)
+    scores = model.score_samples(X_test)
+    
+    # Calculate metrics
+    metrics = {}
+    
+    if true_labels is not None:
+        metrics_calculator = AnomalyDetectionMetrics()
+        metrics = metrics_calculator.calculate_all_metrics(
+            y_true=true_labels,
+            y_pred=predictions,
+            y_scores=scores
         )
-        self.is_trained = False
-        self.feature_names = []
-        self.training_stats = {}
-        
-    def train(
-        self,
-        features: np.ndarray,
-        feature_names: List[str]
-    ) -> Dict:
-        """
-        Train the Isolation Forest model
-        
-        Args:
-            features: Training feature matrix (n_samples, n_features)
-            feature_names: Names of features
-            
-        Returns:
-            Training statistics
-        """
-        try:
-            logger.info(f"Training Isolation Forest on {features.shape[0]} samples")
-            
-            # Train model
-            self.model.fit(features)
-            self.is_trained = True
-            self.feature_names = feature_names
-            
-            # Calculate training statistics
-            scores = self.model.score_samples(features)
-            predictions = self.model.predict(features)
-            
-            self.training_stats = {
-                'n_samples': features.shape[0],
-                'n_features': features.shape[1],
-                'anomaly_count': int(np.sum(predictions == -1)),
-                'anomaly_rate': float(np.mean(predictions == -1)),
-                'mean_score': float(np.mean(scores)),
-                'std_score': float(np.std(scores)),
-                'min_score': float(np.min(scores)),
-                'max_score': float(np.max(scores)),
-                'trained_at': datetime.utcnow().isoformat()
-            }
-            
-            logger.info(f"Training complete. Anomaly rate: {self.training_stats['anomaly_rate']:.2%}")
-            return self.training_stats
-            
-        except Exception as e:
-            logger.error(f"Training failed: {str(e)}")
-            raise
-    
-    def predict(
-        self,
-        features: np.ndarray,
-        return_scores: bool = True
-    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """
-        Predict anomalies for new data
-        
-        Args:
-            features: Feature matrix (n_samples, n_features)
-            return_scores: Whether to return anomaly scores
-            
-        Returns:
-            predictions: Array of predictions (1=normal, -1=anomaly)
-            scores: Anomaly scores (if return_scores=True)
-        """
-        if not self.is_trained:
-            raise ValueError("Model must be trained before prediction")
-        
-        predictions = self.model.predict(features)
-        
-        if return_scores:
-            scores = self.model.score_samples(features)
-            # Convert to 0-1 scale (higher = more anomalous)
-            normalized_scores = self._normalize_scores(scores)
-            return predictions, normalized_scores
-        
-        return predictions, None
-    
-    def predict_single(
-        self,
-        features: np.ndarray
-    ) -> Dict:
-        """
-        Predict anomaly for a single log entry
-        
-        Args:
-            features: Single feature vector
-            
-        Returns:
-            Prediction result with score and classification
-        """
-        if features.ndim == 1:
-            features = features.reshape(1, -1)
-        
-        prediction, scores = self.predict(features, return_scores=True)
-        
-        is_anomaly = prediction[0] == -1
-        anomaly_score = float(scores[0])
-        
-        # Determine severity based on score
-        severity = self._calculate_severity(anomaly_score)
-        
-        return {
-            'is_anomaly': bool(is_anomaly),
-            'anomaly_score': anomaly_score,
-            'severity': severity,
-            'confidence': self._calculate_confidence(anomaly_score),
-            'prediction': int(prediction[0])
+    else:
+        # Basic statistics without labels
+        metrics = {
+            'n_samples': len(predictions),
+            'n_anomalies_detected': np.sum(predictions),
+            'anomaly_rate': np.mean(predictions),
+            'score_mean': np.mean(scores),
+            'score_std': np.std(scores)
         }
     
-    def _normalize_scores(self, scores: np.ndarray) -> np.ndarray:
-        """Normalize anomaly scores to 0-1 range"""
-        # Isolation Forest scores are negative (more negative = more anomalous)
-        # Convert to 0-1 scale where 1 = most anomalous
-        min_score = self.training_stats.get('min_score', scores.min())
-        max_score = self.training_stats.get('max_score', scores.max())
-        
-        if max_score == min_score:
-            return np.zeros_like(scores)
-        
-        normalized = 1 - (scores - min_score) / (max_score - min_score)
-        return np.clip(normalized, 0, 1)
+    return metrics
+
+
+def save_model_artifacts(
+    model: IsolationForestDetector,
+    preprocessor: LogDataPreprocessor,
+    metrics: dict,
+    output_dir: str
+):
+    """
+    Save model, preprocessor, and metadata
     
-    def _calculate_severity(self, score: float) -> str:
-        """Calculate severity level based on anomaly score"""
-        if score >= 0.8:
-            return 'critical'
-        elif score >= 0.6:
-            return 'high'
-        elif score >= 0.4:
-            return 'medium'
+    Args:
+        model: Trained model
+        preprocessor: Fitted preprocessor
+        metrics: Evaluation metrics
+        output_dir: Output directory
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Save model
+    model_path = output_path / 'isolation_forest_model.pkl'
+    model.save(str(model_path))
+    logger.info(f"Model saved to {model_path}")
+    
+    # Save preprocessor
+    preprocessor_path = output_path / 'preprocessor.pkl'
+    preprocessor.save(str(preprocessor_path))
+    logger.info(f"Preprocessor saved to {preprocessor_path}")
+    
+    # Save metadata
+    metadata = {
+        'model_type': 'isolation_forest',
+        'training_date': datetime.now().isoformat(),
+        'n_features': len(preprocessor.feature_names),
+        'feature_names': preprocessor.feature_names,
+        'metrics': metrics,
+        'model_params': {
+            'contamination': model.contamination,
+            'n_estimators': model.n_estimators,
+            'max_samples': model.max_samples,
+            'random_state': model.random_state
+        }
+    }
+    
+    metadata_path = output_path / 'model_metadata.json'
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    logger.info(f"Metadata saved to {metadata_path}")
+
+
+def main():
+    """Main training pipeline"""
+    parser = argparse.ArgumentParser(description='Train Isolation Forest anomaly detector')
+    
+    parser.add_argument(
+        '--data-source',
+        type=str,
+        choices=['mongodb', 'csv'],
+        default='mongodb',
+        help='Data source'
+    )
+    parser.add_argument(
+        '--mongodb-uri',
+        type=str,
+        default='mongodb://localhost:27017',
+        help='MongoDB connection string'
+    )
+    parser.add_argument(
+        '--csv-path',
+        type=str,
+        help='Path to CSV file'
+    )
+    parser.add_argument(
+        '--limit',
+        type=int,
+        default=10000,
+        help='Maximum number of records to load'
+    )
+    parser.add_argument(
+        '--contamination',
+        type=float,
+        default=0.1,
+        help='Expected proportion of anomalies'
+    )
+    parser.add_argument(
+        '--n-estimators',
+        type=int,
+        default=100,
+        help='Number of trees in forest'
+    )
+    parser.add_argument(
+        '--test-size',
+        type=float,
+        default=0.2,
+        help='Test set size'
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='saved_models',
+        help='Output directory for model artifacts'
+    )
+    parser.add_argument(
+        '--random-state',
+        type=int,
+        default=42,
+        help='Random seed'
+    )
+    
+    args = parser.parse_args()
+    
+    try:
+        # Load data
+        if args.data_source == 'mongodb':
+            df = load_data_from_mongodb(
+                mongodb_uri=args.mongodb_uri,
+                limit=args.limit
+            )
         else:
-            return 'low'
-    
-    def _calculate_confidence(self, score: float) -> float:
-        """Calculate confidence in the prediction"""
-        # Higher scores = higher confidence
-        return min(score * 1.2, 1.0)
-    
-    def save(self, filepath: str) -> None:
-        """Save model to disk"""
-        try:
-            model_data = {
-                'model': self.model,
-                'feature_names': self.feature_names,
-                'training_stats': self.training_stats,
-                'is_trained': self.is_trained
-            }
-            
-            with open(filepath, 'wb') as f:
-                pickle.dump(model_data, f)
-            
-            logger.info(f"Model saved to {filepath}")
-            
-        except Exception as e:
-            logger.error(f"Failed to save model: {str(e)}")
-            raise
-    
-    def load(self, filepath: str) -> None:
-        """Load model from disk"""
-        try:
-            with open(filepath, 'rb') as f:
-                model_data = pickle.load(f)
-            
-            self.model = model_data['model']
-            self.feature_names = model_data['feature_names']
-            self.training_stats = model_data['training_stats']
-            self.is_trained = model_data['is_trained']
-            
-            logger.info(f"Model loaded from {filepath}")
-            
-        except Exception as e:
-            logger.error(f"Failed to load model: {str(e)}")
-            raise
-    
-    def get_feature_importance(self) -> Dict[str, float]:
-        """
-        Get feature importance scores (approximation for Isolation Forest)
+            if not args.csv_path:
+                raise ValueError("--csv-path required when data-source is 'csv'")
+            df = load_data_from_csv(args.csv_path)
         
-        Returns:
-            Dictionary mapping feature names to importance scores
-        """
-        if not self.is_trained:
-            raise ValueError("Model must be trained first")
+        # Check if we have minimum data
+        if len(df) < 100:
+            logger.warning(f"Only {len(df)} samples available. This may not be enough for training.")
         
-        # For Isolation Forest, we approximate importance by
-        # the variance in path lengths for each feature
-        return dict(zip(self.feature_names, [1.0] * len(self.feature_names)))
-    
-    def get_model_info(self) -> Dict:
-        """Get model metadata and statistics"""
-        return {
-            'model_type': 'IsolationForest',
-            'is_trained': self.is_trained,
-            'n_features': len(self.feature_names),
-            'feature_names': self.feature_names,
-            'training_stats': self.training_stats,
-            'hyperparameters': {
-                'contamination': self.model.contamination,
-                'n_estimators': self.model.n_estimators,
-                'max_samples': self.model.max_samples
-            }
-        }
+        # Split data
+        train_df, test_df = train_test_split(
+            df,
+            test_size=args.test_size,
+            random_state=args.random_state
+        )
+        
+        logger.info(f"Train set: {len(train_df)} samples")
+        logger.info(f"Test set: {len(test_df)} samples")
+        
+        # Create and fit preprocessor
+        preprocessor = LogDataPreprocessor(
+            max_tfidf_features=50,
+            scale_numerical=True,
+            scaler_type='standard'
+        )
+        
+        X_train = preprocessor.fit_transform(train_df)
+        logger.info(f"Feature matrix shape: {X_train.shape}")
+        
+        # Train model
+        model = train_isolation_forest(
+            train_data=train_df,
+            preprocessor=preprocessor,
+            contamination=args.contamination,
+            n_estimators=args.n_estimators,
+            random_state=args.random_state
+        )
+        
+        # Evaluate
+        metrics = evaluate_model(
+            model=model,
+            test_data=test_df,
+            preprocessor=preprocessor
+        )
+        
+        logger.info("Evaluation metrics:")
+        for key, value in metrics.items():
+            if isinstance(value, float):
+                logger.info(f"  {key}: {value:.4f}")
+            else:
+                logger.info(f"  {key}: {value}")
+        
+        # Save artifacts
+        save_model_artifacts(
+            model=model,
+            preprocessor=preprocessor,
+            metrics=metrics,
+            output_dir=args.output_dir
+        )
+        
+        logger.info("Training pipeline completed successfully!")
+        
+    except Exception as e:
+        logger.error(f"Training failed: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

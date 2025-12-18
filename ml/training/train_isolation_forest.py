@@ -1,19 +1,23 @@
 """
-Training Script for Isolation Forest Model
+Training pipeline for Isolation Forest anomaly detection
 """
 import sys
-import os
-from pathlib import Path
+import argparse
 import logging
-from datetime import datetime
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+import pickle
 import json
+from datetime import datetime
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pymongo import MongoClient
-from ml.inference.anomaly_detector import AnomalyDetector
-from ml.feature_engineering.extractors import LogFeatureExtractor
+from models.isolation_forest import IsolationForestDetector
+from training.data_preprocessor import LogDataPreprocessor
+from evaluation.metrics import AnomalyDetectionMetrics
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,235 +26,325 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class ModelTrainer:
-    """Train anomaly detection models"""
+def load_data_from_mongodb(
+    mongodb_uri: str,
+    database: str = 'log_analytics',
+    collection: str = 'logs',
+    limit: int = 10000
+) -> pd.DataFrame:
+    """
+    Load log data from MongoDB
     
-    def __init__(
-        self,
-        mongo_uri: str = "mongodb://localhost:27017",
-        db_name: str = "log_analytics"
-    ):
-        self.mongo_client = MongoClient(mongo_uri)
-        self.db = self.mongo_client[db_name]
-        self.logs_collection = self.db['logs']
-        self.models_collection = self.db['ml_models']
+    Args:
+        mongodb_uri: MongoDB connection string
+        database: Database name
+        collection: Collection name
+        limit: Maximum number of records
         
-    def load_training_data(
-        self,
-        limit: int = 10000,
-        filter_query: dict = None
-    ) -> list:
-        """
-        Load training data from MongoDB
-        
-        Args:
-            limit: Maximum number of logs to load
-            filter_query: MongoDB filter query
-            
-        Returns:
-            List of log entries
-        """
-        logger.info(f"Loading training data (limit: {limit})")
-        
-        query = filter_query or {}
-        logs = list(self.logs_collection.find(query).limit(limit))
-        
-        # Convert ObjectId to string
-        for log in logs:
-            log['_id'] = str(log['_id'])
-        
-        logger.info(f"Loaded {len(logs)} log entries")
-        return logs
+    Returns:
+        DataFrame with log data
+    """
+    from pymongo import MongoClient
     
-    def train_isolation_forest(
-        self,
-        training_logs: list,
-        contamination: float = 0.1,
-        n_estimators: int = 100
-    ) -> tuple:
-        """
-        Train Isolation Forest model
-        
-        Args:
-            training_logs: List of log entries
-            contamination: Expected anomaly rate
-            n_estimators: Number of trees
-            
-        Returns:
-            Tuple of (detector, training_stats)
-        """
-        logger.info("Training Isolation Forest model")
-        
-        # Initialize detector
-        detector = AnomalyDetector(contamination=contamination)
-        detector.model.n_estimators = n_estimators
-        
-        # Train model
-        stats = detector.train_model(training_logs)
-        
-        logger.info(f"Training completed: {stats}")
-        return detector, stats
+    logger.info(f"Loading data from MongoDB: {database}.{collection}")
     
-    def save_model(
-        self,
-        detector: AnomalyDetector,
-        training_stats: dict,
-        version: str = None
-    ) -> str:
-        """
-        Save trained model and metadata
-        
-        Args:
-            detector: Trained AnomalyDetector
-            training_stats: Training statistics
-            version: Model version
-            
-        Returns:
-            Path to saved model
-        """
-        # Create models directory
-        models_dir = Path(__file__).parent.parent / 'saved_models'
-        models_dir.mkdir(exist_ok=True)
-        
-        # Generate version if not provided
-        if not version:
-            version = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        
-        # Save model file
-        model_path = models_dir / f'isolation_forest_{version}.pkl'
-        detector.model.save(str(model_path))
-        
-        # Save metadata
-        metadata = {
-            'model_type': 'isolation_forest',
-            'version': version,
-            'trained_at': datetime.utcnow().isoformat(),
-            'model_path': str(model_path),
-            'training_stats': training_stats,
-            'feature_names': detector.feature_extractor.get_feature_names(),
-            'hyperparameters': {
-                'contamination': detector.model.model.contamination,
-                'n_estimators': detector.model.model.n_estimators
-            }
-        }
-        
-        metadata_path = models_dir / f'model_metadata_{version}.json'
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        # Save to MongoDB
-        self.models_collection.insert_one({
-            **metadata,
-            'status': 'active',
-            'created_at': datetime.utcnow()
-        })
-        
-        logger.info(f"Model saved: {model_path}")
-        logger.info(f"Metadata saved: {metadata_path}")
-        
-        return str(model_path)
+    client = MongoClient(mongodb_uri)
+    db = client[database]
     
-    def evaluate_model(
-        self,
-        detector: AnomalyDetector,
-        test_logs: list
-    ) -> dict:
-        """
-        Evaluate model on test data
+    # Get logs
+    logs = list(db[collection].find().limit(limit))
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(logs)
+    
+    logger.info(f"Loaded {len(df)} log entries")
+    
+    client.close()
+    
+    return df
+
+
+def load_data_from_csv(csv_path: str) -> pd.DataFrame:
+    """Load log data from CSV file"""
+    logger.info(f"Loading data from CSV: {csv_path}")
+    df = pd.read_csv(csv_path)
+    logger.info(f"Loaded {len(df)} log entries")
+    return df
+
+
+def train_isolation_forest(
+    train_data: pd.DataFrame,
+    preprocessor: LogDataPreprocessor,
+    contamination: float = 0.1,
+    n_estimators: int = 100,
+    random_state: int = 42
+) -> IsolationForestDetector:
+    """
+    Train Isolation Forest model
+    
+    Args:
+        train_data: Training data
+        preprocessor: Fitted preprocessor
+        contamination: Expected proportion of anomalies
+        n_estimators: Number of trees
+        random_state: Random seed
         
-        Args:
-            detector: Trained AnomalyDetector
-            test_logs: List of test log entries
-            
-        Returns:
-            Evaluation metrics
-        """
-        logger.info(f"Evaluating model on {len(test_logs)} test logs")
+    Returns:
+        Trained model
+    """
+    logger.info("Training Isolation Forest model...")
+    
+    # Preprocess data
+    X_train = preprocessor.transform(train_data)
+    
+    # Create and train model
+    model = IsolationForestDetector(
+        contamination=contamination,
+        n_estimators=n_estimators,
+        random_state=random_state
+    )
+    
+    model.fit(X_train)
+    
+    logger.info("Training completed")
+    
+    return model
+
+
+def evaluate_model(
+    model: IsolationForestDetector,
+    test_data: pd.DataFrame,
+    preprocessor: LogDataPreprocessor,
+    true_labels: np.ndarray = None
+) -> dict:
+    """
+    Evaluate model performance
+    
+    Args:
+        model: Trained model
+        test_data: Test data
+        preprocessor: Fitted preprocessor
+        true_labels: True anomaly labels (if available)
         
-        results = detector.detect_batch(test_logs)
-        
-        # Calculate metrics
-        anomaly_count = sum(1 for r in results if r.get('is_anomaly', False))
-        anomaly_rate = anomaly_count / len(results) if results else 0
-        
-        scores = [r.get('anomaly_score', 0) for r in results]
-        avg_score = sum(scores) / len(scores) if scores else 0
-        
+    Returns:
+        Evaluation metrics
+    """
+    logger.info("Evaluating model...")
+    
+    # Preprocess
+    X_test = preprocessor.transform(test_data)
+    
+    # Predict
+    predictions = model.predict(X_test)
+    scores = model.score_samples(X_test)
+    
+    # Calculate metrics
+    metrics = {}
+    
+    if true_labels is not None:
+        metrics_calculator = AnomalyDetectionMetrics()
+        metrics = metrics_calculator.calculate_all_metrics(
+            y_true=true_labels,
+            y_pred=predictions,
+            y_scores=scores
+        )
+    else:
+        # Basic statistics without labels
         metrics = {
-            'total_samples': len(test_logs),
-            'anomalies_detected': anomaly_count,
-            'anomaly_rate': anomaly_rate,
-            'average_score': avg_score,
-            'score_distribution': {
-                'min': min(scores) if scores else 0,
-                'max': max(scores) if scores else 0,
-                'mean': avg_score
-            }
+            'n_samples': len(predictions),
+            'n_anomalies_detected': np.sum(predictions),
+            'anomaly_rate': np.mean(predictions),
+            'score_mean': np.mean(scores),
+            'score_std': np.std(scores)
         }
-        
-        logger.info(f"Evaluation complete: {metrics}")
-        return metrics
     
-    def close(self):
-        """Close database connections"""
-        self.mongo_client.close()
+    return metrics
+
+
+def save_model_artifacts(
+    model: IsolationForestDetector,
+    preprocessor: LogDataPreprocessor,
+    metrics: dict,
+    output_dir: str
+):
+    """
+    Save model, preprocessor, and metadata
+    
+    Args:
+        model: Trained model
+        preprocessor: Fitted preprocessor
+        metrics: Evaluation metrics
+        output_dir: Output directory
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Save model
+    model_path = output_path / 'isolation_forest_model.pkl'
+    model.save(str(model_path))
+    logger.info(f"Model saved to {model_path}")
+    
+    # Save preprocessor
+    preprocessor_path = output_path / 'preprocessor.pkl'
+    preprocessor.save(str(preprocessor_path))
+    logger.info(f"Preprocessor saved to {preprocessor_path}")
+    
+    # Save metadata
+    metadata = {
+        'model_type': 'isolation_forest',
+        'training_date': datetime.now().isoformat(),
+        'n_features': len(preprocessor.feature_names),
+        'feature_names': preprocessor.feature_names,
+        'metrics': metrics,
+        'model_params': {
+            'contamination': model.contamination,
+            'n_estimators': model.n_estimators,
+            'max_samples': model.max_samples,
+            'random_state': model.random_state
+        }
+    }
+    
+    metadata_path = output_path / 'model_metadata.json'
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    logger.info(f"Metadata saved to {metadata_path}")
 
 
 def main():
     """Main training pipeline"""
-    logger.info("Starting model training pipeline")
+    parser = argparse.ArgumentParser(description='Train Isolation Forest anomaly detector')
     
-    # Initialize trainer
-    trainer = ModelTrainer(
-        mongo_uri=os.getenv('MONGODB_URI', 'mongodb://localhost:27017'),
-        db_name=os.getenv('DB_NAME', 'log_analytics')
+    parser.add_argument(
+        '--data-source',
+        type=str,
+        choices=['mongodb', 'csv'],
+        default='mongodb',
+        help='Data source'
+    )
+    parser.add_argument(
+        '--mongodb-uri',
+        type=str,
+        default='mongodb://localhost:27017',
+        help='MongoDB connection string'
+    )
+    parser.add_argument(
+        '--csv-path',
+        type=str,
+        help='Path to CSV file'
+    )
+    parser.add_argument(
+        '--limit',
+        type=int,
+        default=10000,
+        help='Maximum number of records to load'
+    )
+    parser.add_argument(
+        '--contamination',
+        type=float,
+        default=0.1,
+        help='Expected proportion of anomalies'
+    )
+    parser.add_argument(
+        '--n-estimators',
+        type=int,
+        default=100,
+        help='Number of trees in forest'
+    )
+    parser.add_argument(
+        '--test-size',
+        type=float,
+        default=0.2,
+        help='Test set size'
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='saved_models',
+        help='Output directory for model artifacts'
+    )
+    parser.add_argument(
+        '--random-state',
+        type=int,
+        default=42,
+        help='Random seed'
     )
     
+    args = parser.parse_args()
+    
     try:
-        # 1. Load training data
-        training_logs = trainer.load_training_data(limit=5000)
+        # Load data
+        if args.data_source == 'mongodb':
+            df = load_data_from_mongodb(
+                mongodb_uri=args.mongodb_uri,
+                limit=args.limit
+            )
+        else:
+            if not args.csv_path:
+                raise ValueError("--csv-path required when data-source is 'csv'")
+            df = load_data_from_csv(args.csv_path)
         
-        if len(training_logs) < 100:
-            logger.error("Insufficient training data. Need at least 100 logs.")
-            return
+        # Check if we have minimum data
+        if len(df) < 100:
+            logger.warning(f"Only {len(df)} samples available. This may not be enough for training.")
         
-        # 2. Split data (80/20)
-        split_idx = int(len(training_logs) * 0.8)
-        train_data = training_logs[:split_idx]
-        test_data = training_logs[split_idx:]
-        
-        logger.info(f"Train: {len(train_data)}, Test: {len(test_data)}")
-        
-        # 3. Train model
-        detector, training_stats = trainer.train_isolation_forest(
-            train_data,
-            contamination=0.1,
-            n_estimators=100
+        # Split data
+        train_df, test_df = train_test_split(
+            df,
+            test_size=args.test_size,
+            random_state=args.random_state
         )
         
-        # 4. Evaluate model
-        evaluation_metrics = trainer.evaluate_model(detector, test_data)
+        logger.info(f"Train set: {len(train_df)} samples")
+        logger.info(f"Test set: {len(test_df)} samples")
         
-        # 5. Save model
-        model_path = trainer.save_model(
-            detector,
-            {**training_stats, 'evaluation': evaluation_metrics}
+        # Create and fit preprocessor
+        preprocessor = LogDataPreprocessor(
+            max_tfidf_features=50,
+            scale_numerical=True,
+            scaler_type='standard'
         )
         
-        logger.info("=" * 50)
-        logger.info("Training Pipeline Complete!")
-        logger.info(f"Model saved at: {model_path}")
-        logger.info(f"Training samples: {training_stats['n_samples']}")
-        logger.info(f"Anomaly rate: {training_stats['anomaly_rate']:.2%}")
-        logger.info(f"Test anomalies: {evaluation_metrics['anomalies_detected']}")
-        logger.info("=" * 50)
+        X_train = preprocessor.fit_transform(train_df)
+        logger.info(f"Feature matrix shape: {X_train.shape}")
+        
+        # Train model
+        model = train_isolation_forest(
+            train_data=train_df,
+            preprocessor=preprocessor,
+            contamination=args.contamination,
+            n_estimators=args.n_estimators,
+            random_state=args.random_state
+        )
+        
+        # Evaluate
+        metrics = evaluate_model(
+            model=model,
+            test_data=test_df,
+            preprocessor=preprocessor
+        )
+        
+        logger.info("Evaluation metrics:")
+        for key, value in metrics.items():
+            if isinstance(value, float):
+                logger.info(f"  {key}: {value:.4f}")
+            else:
+                logger.info(f"  {key}: {value}")
+        
+        # Save artifacts
+        save_model_artifacts(
+            model=model,
+            preprocessor=preprocessor,
+            metrics=metrics,
+            output_dir=args.output_dir
+        )
+        
+        logger.info("Training pipeline completed successfully!")
         
     except Exception as e:
-        logger.error(f"Training pipeline failed: {str(e)}", exc_info=True)
-        raise
-    finally:
-        trainer.close()
+        logger.error(f"Training failed: {e}", exc_info=True)
+        sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
