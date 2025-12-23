@@ -1,0 +1,314 @@
+# ===================================
+# Prometheus Alert Rules
+# AI Log Analytics - Alert Definitions
+# ===================================
+
+groups:
+  # ===== API & Application Alerts =====
+  - name: api_alerts
+    interval: 30s
+    rules:
+      - alert: HighAPIErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{job="backend",status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{job="backend"}[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "High API error rate detected"
+          description: "API error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+          
+      - alert: HighAPILatency
+        expr: |
+          histogram_quantile(0.95, 
+            rate(http_request_duration_seconds_bucket{job="backend"}[5m])
+          ) > 5
+        for: 10m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High API latency detected"
+          description: "P95 latency is {{ $value }}s (threshold: 5s)"
+          
+      - alert: APIServiceDown
+        expr: up{job="backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "API service is down"
+          description: "Backend API service has been down for more than 1 minute"
+
+  # ===== Log Processing Alerts =====
+  - name: log_processing_alerts
+    interval: 30s
+    rules:
+      - alert: LogIngestionStalled
+        expr: |
+          rate(logs_ingested_total{job="backend"}[5m]) < 1
+          and
+          redis_stream_length > 100
+        for: 10m
+        labels:
+          severity: warning
+          component: log_ingestion
+        annotations:
+          summary: "Log ingestion appears stalled"
+          description: "No logs ingested in 10 minutes despite {{ $value }} logs in stream"
+          
+      - alert: HighLogIngestionRate
+        expr: rate(logs_ingested_total{job="backend"}[1m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: log_ingestion
+        annotations:
+          summary: "Unusually high log ingestion rate"
+          description: "Ingesting {{ $value }} logs/second (may indicate an issue)"
+          
+      - alert: RedisStreamBacklog
+        expr: redis_stream_length > 10000
+        for: 5m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "Large Redis stream backlog"
+          description: "Stream has {{ $value }} pending messages"
+          
+      - alert: LogConsumerDown
+        expr: up{job="log_consumer"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: worker
+        annotations:
+          summary: "Log consumer worker is down"
+          description: "Log consumer has been down for more than 2 minutes"
+
+  # ===== ML & Anomaly Detection Alerts =====
+  - name: ml_alerts
+    interval: 30s
+    rules:
+      - alert: HighAnomalyRate
+        expr: |
+          (
+            sum(rate(anomalies_detected_total{severity="critical"}[10m]))
+            /
+            sum(rate(logs_processed_total{job="ml_service"}[10m]))
+          ) > 0.2
+        for: 10m
+        labels:
+          severity: critical
+          component: ml
+        annotations:
+          summary: "High anomaly detection rate"
+          description: "{{ $value | humanizePercentage }} of logs flagged as anomalies (threshold: 20%)"
+          
+      - alert: MLInferenceLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(ml_inference_duration_seconds_bucket[5m])
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+          component: ml
+        annotations:
+          summary: "High ML inference latency"
+          description: "P95 inference time is {{ $value }}s (threshold: 1s)"
+          
+      - alert: AnomalyWorkerDown
+        expr: up{job="anomaly_worker"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: worker
+        annotations:
+          summary: "Anomaly detection worker is down"
+          description: "Anomaly worker has been down for more than 2 minutes"
+          
+      - alert: MLModelNotTrained
+        expr: ml_model_trained == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: ml
+        annotations:
+          summary: "ML model is not trained"
+          description: "Anomaly detection model needs training"
+
+  # ===== Database Alerts =====
+  - name: database_alerts
+    interval: 30s
+    rules:
+      - alert: MongoDBDown
+        expr: up{job="mongodb"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "MongoDB is down"
+          description: "MongoDB has been down for more than 1 minute"
+          
+      - alert: MongoDBHighConnections
+        expr: mongodb_connections{state="current"} > 800
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "High MongoDB connection count"
+          description: "MongoDB has {{ $value }} connections (threshold: 800)"
+          
+      - alert: MongoDBSlowQueries
+        expr: rate(mongodb_mongod_op_latencies_latency_total[5m]) > 1000000
+        for: 10m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "MongoDB slow queries detected"
+          description: "Query latency is {{ $value }}µs"
+          
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: cache
+        annotations:
+          summary: "Redis is down"
+          description: "Redis has been down for more than 1 minute"
+          
+      - alert: RedisHighMemory
+        expr: |
+          (redis_memory_used_bytes / redis_memory_max_bytes) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "Redis memory usage high"
+          description: "Redis is using {{ $value | humanizePercentage }} of max memory"
+
+  # ===== System Resource Alerts =====
+  - name: system_alerts
+    interval: 30s
+    rules:
+      - alert: HighCPUUsage
+        expr: |
+          100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value }}% (threshold: 80%)"
+          
+      - alert: HighMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is {{ $value }}% (threshold: 85%)"
+          
+      - alert: DiskSpaceLow
+        expr: |
+          (1 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})) * 100 > 85
+        for: 5m
+        labels:
+          severity: critical
+          component: system
+        annotations:
+          summary: "Low disk space on {{ $labels.instance }}"
+          description: "Disk usage is {{ $value }}% (threshold: 85%)"
+          
+      - alert: HighDiskIOWait
+        expr: rate(node_cpu_seconds_total{mode="iowait"}[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High disk I/O wait on {{ $labels.instance }}"
+          description: "I/O wait is {{ $value | humanizePercentage }}"
+
+  # ===== Container Alerts =====
+  - name: container_alerts
+    interval: 30s
+    rules:
+      - alert: ContainerHighCPU
+        expr: |
+          sum(rate(container_cpu_usage_seconds_total{name!=""}[5m])) by (name) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          component: docker
+        annotations:
+          summary: "High CPU usage in container {{ $labels.name }}"
+          description: "Container CPU usage is {{ $value }}%"
+          
+      - alert: ContainerHighMemory
+        expr: |
+          (container_memory_usage_bytes{name!=""} / container_spec_memory_limit_bytes{name!=""}) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+          component: docker
+        annotations:
+          summary: "High memory usage in container {{ $labels.name }}"
+          description: "Container memory usage is {{ $value }}%"
+          
+      - alert: ContainerRestarting
+        expr: rate(container_last_seen{name!=""}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: docker
+        annotations:
+          summary: "Container {{ $labels.name }} is restarting frequently"
+          description: "Container has restarted {{ $value }} times in 5 minutes"
+
+  # ===== Business Logic Alerts =====
+  - name: business_alerts
+    interval: 1m
+    rules:
+      - alert: CriticalErrorSpike
+        expr: |
+          (
+            sum(rate(logs_ingested_total{level="ERROR"}[5m]))
+            /
+            sum(rate(logs_ingested_total[5m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          component: business
+        annotations:
+          summary: "Spike in ERROR level logs"
+          description: "{{ $value | humanizePercentage }} of logs are errors (threshold: 10%)"
+          
+      - alert: ServiceHealthDegraded
+        expr: |
+          sum(up{component=~"api|worker|ml"}) / count(up{component=~"api|worker|ml"}) < 0.8
+        for: 2m
+        labels:
+          severity: critical
+          component: business
+        annotations:
+          summary: "Multiple services are down"
+          description: "Only {{ $value | humanizePercentage }} of services are healthy"

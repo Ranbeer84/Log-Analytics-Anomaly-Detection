@@ -1,0 +1,142 @@
+# ===================================
+# Prometheus Configuration
+# AI Log Analytics - Metrics Collection
+# ===================================
+
+global:
+  scrape_interval: 15s      # Scrape targets every 15 seconds
+  evaluation_interval: 15s  # Evaluate rules every 15 seconds
+  scrape_timeout: 10s
+  
+  # Attach these labels to any time series or alerts
+  external_labels:
+    cluster: 'ai-log-analytics'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Load rules once and periodically evaluate them
+rule_files:
+  - "alerts/alert_rules.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+
+  # FastAPI Backend
+  - job_name: 'backend'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['backend:8000']
+        labels:
+          service: 'backend'
+          component: 'api'
+    
+    # Relabeling for better organization
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+):.*'
+        replacement: '${1}'
+
+  # ML Service
+  - job_name: 'ml_service'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['ml_service:8001']
+        labels:
+          service: 'ml_service'
+          component: 'ml'
+
+  # MongoDB Exporter
+  - job_name: 'mongodb'
+    static_configs:
+      - targets: ['mongodb-exporter:9216']
+        labels:
+          service: 'mongodb'
+          component: 'database'
+
+  # Redis Exporter
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          service: 'redis'
+          component: 'cache'
+
+  # Node Exporter (System metrics)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          service: 'system'
+          component: 'host'
+
+  # cAdvisor (Container metrics)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          service: 'docker'
+          component: 'containers'
+    
+    metric_relabel_configs:
+      # Drop unnecessary metrics
+      - source_labels: [__name__]
+        regex: 'container_(network_tcp_usage_total|network_udp_usage_total)'
+        action: drop
+
+  # Nginx Exporter
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+        labels:
+          service: 'nginx'
+          component: 'proxy'
+
+  # Log Consumer Worker
+  - job_name: 'log_consumer'
+    static_configs:
+      - targets: ['log_consumer:9090']
+        labels:
+          service: 'log_consumer'
+          component: 'worker'
+
+  # Anomaly Worker
+  - job_name: 'anomaly_worker'
+    static_configs:
+      - targets: ['anomaly_worker:9091']
+        labels:
+          service: 'anomaly_worker'
+          component: 'worker'
+
+# Remote write configuration (for long-term storage)
+# Uncomment to enable remote write to services like Thanos, Cortex, or Grafana Cloud
+# remote_write:
+#   - url: 'http://remote-storage:9009/api/v1/push'
+#     queue_config:
+#       capacity: 10000
+#       max_shards: 5
+#       min_shards: 1
+#       max_samples_per_send: 1000
+#       batch_send_deadline: 5s
+#       min_backoff: 30ms
+#       max_backoff: 100ms
+
+# Storage configuration
+storage:
+  tsdb:
+    path: /prometheus/data
+    retention:
+      time: 30d      # Keep metrics for 30 days
+      size: 10GB     # Maximum storage size
